@@ -49,86 +49,82 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import DecimalType
 from pyspark.sql.window import Window
 
-from pipeline.spark_utils import get_or_create_spark, load_config
+from pipeline.spark_utils import get_or_create_spark, load_config, load_dq_rules
 
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Currency normalisation helpers
+# Currency normalisation helpers  (config-driven via dq_rules.yaml)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# All known representations of South African Rand in Stage 1/2 source data.
-_ZAR_STRINGS = ("ZAR", "zar", "R", "rands", "Rands", "RANDS")
-_ZAR_ISO_NUMERIC = 710  # ISO 4217 numeric code for ZAR
-
-
-def _is_zar_variant(currency_col) -> "Column":
-    """True when the raw currency value is a non-"ZAR" variant."""
+def _is_zar_variant(currency_col, curr_cfg: dict) -> "Column":
+    """True when the raw currency value is a non-target-value variant."""
+    target      = curr_cfg["target_value"]
+    variants    = [target] + curr_cfg["known_variants"]
+    iso_numeric = curr_cfg["iso_numeric"]
     return (
-        ~currency_col.isin("ZAR")
+        ~currency_col.isin(target)
         & (
-            currency_col.isin(*_ZAR_STRINGS)
-            | (currency_col.cast("int") == _ZAR_ISO_NUMERIC)
+            currency_col.isin(*variants)
+            | (currency_col.cast("int") == iso_numeric)
         )
     )
 
 
-def _normalise_currency(currency_col) -> "Column":
-    """Return "ZAR" for all known SA Rand representations; preserve others."""
+def _normalise_currency(currency_col, curr_cfg: dict) -> "Column":
+    """Return the target currency code for all known variants; preserve others."""
+    target      = curr_cfg["target_value"]
+    variants    = [target] + curr_cfg["known_variants"]
+    iso_numeric = curr_cfg["iso_numeric"]
     return (
         F.when(
-            currency_col.isin(*_ZAR_STRINGS)
-            | (currency_col.cast("int") == _ZAR_ISO_NUMERIC),
-            F.lit("ZAR"),
+            currency_col.isin(*variants)
+            | (currency_col.cast("int") == iso_numeric),
+            F.lit(target),
         ).otherwise(currency_col)
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Date parsing helpers
+# Date parsing helpers  (config-driven via dq_rules.yaml)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Primary ISO format used throughout Stage 1 data.
-_PRIMARY_DATE_FMT = "yyyy-MM-dd"
-
-# Stage 2 variant formats announced in the spec addendum.
-_VARIANT_DATE_FMTS = ("dd/MM/yyyy",)
-
-# Unix epoch pattern: 9–11 digit integer string (covers 2001 – 2286)
-_EPOCH_PATTERN = r"^\d{9,11}$"
+def _parse_date_primary(col_expr, date_cfg: dict) -> "Column":
+    """Parse date using the primary ISO format from config."""
+    return F.to_date(col_expr, date_cfg["primary_format"])
 
 
-def _parse_date_primary(col_expr) -> "Column":
-    """Parse date using the primary ISO format only."""
-    return F.to_date(col_expr, _PRIMARY_DATE_FMT)
-
-
-def _parse_date_any(col_expr):
+def _parse_date_any(col_expr, date_cfg: dict):
     """
     Try primary ISO format, then variant formats, then Unix epoch.
+    All formats are sourced from date_format_checks in dq_rules.yaml.
     Returns a DATE column (nulls where all attempts fail).
     """
-    result = F.to_date(col_expr, _PRIMARY_DATE_FMT)
-    for fmt in _VARIANT_DATE_FMTS:
+    primary_fmt   = date_cfg["primary_format"]
+    variant_fmts  = date_cfg.get("variant_formats", [])
+    epoch_pattern = date_cfg.get("epoch_pattern", r"^\d{9,11}$")
+
+    result = F.to_date(col_expr, primary_fmt)
+    for fmt in variant_fmts:
         result = F.coalesce(result, F.to_date(col_expr, fmt))
     # Epoch integers stored as strings
     result = F.coalesce(
         result,
         F.when(
-            col_expr.rlike(_EPOCH_PATTERN),
+            col_expr.rlike(epoch_pattern),
             F.to_date(F.from_unixtime(col_expr.cast("long"))),
         ),
     )
     return result
 
 
-def _date_is_variant(col_expr) -> "Column":
+def _date_is_variant(col_expr, date_cfg: dict) -> "Column":
     """
     True when the raw string represents a valid date but NOT in primary
     ISO format — i.e., it required a fallback parse.
     """
-    primary_ok  = _parse_date_primary(col_expr).isNotNull()
-    fallback_ok = _parse_date_any(col_expr).isNotNull()
+    primary_ok  = _parse_date_primary(col_expr, date_cfg).isNotNull()
+    fallback_ok = _parse_date_any(col_expr, date_cfg).isNotNull()
     return ~primary_ok & fallback_ok
 
 
@@ -140,6 +136,7 @@ def run_transformation(config: dict = None) -> None:
     """Transform all three Bronze tables into typed, clean Silver tables."""
     if config is None:
         config = load_config()
+    dq_rules = load_dq_rules()
 
     spark  = get_or_create_spark(config)
     bronze = config["output"]["bronze_path"]
@@ -149,13 +146,14 @@ def run_transformation(config: dict = None) -> None:
 
     # Order matters: accounts must be written before transactions so the
     # orphan-account cross-reference JOIN can read from Silver accounts.
-    _transform_customers(spark, f"{bronze}/customers",    f"{silver}/customers")
-    _transform_accounts( spark, f"{bronze}/accounts",     f"{silver}/accounts")
+    _transform_customers(spark, f"{bronze}/customers",    f"{silver}/customers",   dq_rules)
+    _transform_accounts( spark, f"{bronze}/accounts",     f"{silver}/accounts",    dq_rules)
     _transform_transactions(
         spark,
         bronze_src=f"{bronze}/transactions",
         silver_accounts_path=f"{silver}/accounts",
         silver_dst=f"{silver}/transactions",
+        dq_rules=dq_rules,
     )
 
     logger.info("Silver transformation complete.")
@@ -169,8 +167,10 @@ def _transform_customers(
     spark: SparkSession,
     bronze_src: str,
     silver_dst: str,
+    dq_rules: dict,
 ) -> None:
     logger.info("[silver] transforming customers")
+    date_cfg = dq_rules["date_format_checks"]
 
     df: DataFrame = spark.read.format("delta").load(bronze_src)
 
@@ -187,7 +187,7 @@ def _transform_customers(
         "id_number",
         "first_name",
         "last_name",
-        _parse_date_any(F.col("dob")).alias("dob"),
+        _parse_date_any(F.col("dob"), date_cfg).alias("dob"),
         "gender",
         "province",
         "income_band",
@@ -206,13 +206,17 @@ def _transform_accounts(
     spark: SparkSession,
     bronze_src: str,
     silver_dst: str,
+    dq_rules: dict,
 ) -> None:
     logger.info("[silver] transforming accounts")
+    date_cfg    = dq_rules["date_format_checks"]
+    null_fields = dq_rules["null_checks"]["accounts"]["fields"]
 
     df: DataFrame = spark.read.format("delta").load(bronze_src)
 
-    # ── Drop records with null primary key (NULL_REQUIRED) ────────────────
-    df = df.filter(F.col("account_id").isNotNull())
+    # ── Drop records with null required fields (NULL_REQUIRED) ────────────
+    for field in null_fields:
+        df = df.filter(F.col(field).isNotNull())
 
     # ── Deduplication ──────────────────────────────────────────────────────
     w_dedup = Window.partitionBy("account_id").orderBy("account_id")
@@ -227,13 +231,13 @@ def _transform_accounts(
         "customer_ref",
         "account_type",
         "account_status",
-        _parse_date_any(F.col("open_date")).alias("open_date"),
+        _parse_date_any(F.col("open_date"), date_cfg).alias("open_date"),
         "product_tier",
         "mobile_number",
         "digital_channel",
         F.col("credit_limit").cast(DecimalType(18, 2)).alias("credit_limit"),
         F.col("current_balance").cast(DecimalType(18, 2)).alias("current_balance"),
-        _parse_date_any(F.col("last_activity_date")).alias("last_activity_date"),
+        _parse_date_any(F.col("last_activity_date"), date_cfg).alias("last_activity_date"),
         "ingestion_timestamp",
     )
 
@@ -246,8 +250,14 @@ def _transform_transactions(
     bronze_src: str,
     silver_accounts_path: str,
     silver_dst: str,
+    dq_rules: dict,
 ) -> None:
     logger.info("[silver] transforming transactions")
+    curr_cfg    = dq_rules["currency_normalisation"]
+    date_cfg    = dq_rules["date_format_checks"]
+    null_fields = dq_rules["null_checks"]["transactions"]["fields"]
+    dup_cfg     = dq_rules["duplicate_checks"]["transactions"]
+    orphan_cfg  = dq_rules["orphan_checks"]["transactions"]
 
     df: DataFrame = spark.read.format("delta").load(bronze_src)
 
@@ -278,9 +288,9 @@ def _transform_transactions(
     # ── Date parsing ──────────────────────────────────────────────────────
     df = df.withColumn(
         "transaction_date_parsed",
-        _parse_date_any(F.col("transaction_date")),
+        _parse_date_any(F.col("transaction_date"), date_cfg),
     )
-    date_is_variant = _date_is_variant(F.col("transaction_date"))
+    date_is_variant = _date_is_variant(F.col("transaction_date"), date_cfg)
 
     # ── Build transaction_timestamp (DATE + TIME → TIMESTAMP) ─────────────
     # Use the raw strings before they are cast so the concat is reliable.
@@ -298,25 +308,21 @@ def _transform_transactions(
 
     # ── Currency variant detection and normalisation ──────────────────────
     currency_col = F.col("currency")
-    is_currency_variant = _is_zar_variant(currency_col)
-    df = df.withColumn("currency", _normalise_currency(currency_col))
+    is_currency_variant = _is_zar_variant(currency_col, curr_cfg)
+    df = df.withColumn("currency", _normalise_currency(currency_col, curr_cfg))
 
-    # ── NULL_REQUIRED check for non-nullable transaction fields ───────────
-    null_required = (
-        F.col("transaction_id").isNull()
-        | F.col("account_id").isNull()
-        | F.col("amount").isNull()
-        | F.col("transaction_type").isNull()
-    )
+    # ── NULL_REQUIRED check (required fields from dq_rules.yaml) ─────────
+    null_required = F.lit(False)
+    for _f in null_fields:
+        null_required = null_required | F.col(_f).isNull()
 
-    # ── Deduplication on transaction_id ──────────────────────────────────
-    # Within each duplicate group, keep the earliest record by date+time
-    # (deterministic tie-breaking).  The survivor retains DUPLICATE_DEDUPED
-    # if the group had more than one member.
-    w_dup = Window.partitionBy("transaction_id").orderBy(
-        "transaction_date", "transaction_time"
-    )
-    w_dup_count = Window.partitionBy("transaction_id")
+    # ── Deduplication (natural key + tiebreak order from dq_rules.yaml) ──
+    # Within each duplicate group, keep the earliest record by tiebreak cols.
+    # The survivor retains DUPLICATE_DEDUPED if the group had >1 member.
+    natural_key    = dup_cfg["natural_key"]
+    tiebreak_order = dup_cfg["tiebreak_order"]
+    w_dup       = Window.partitionBy(natural_key).orderBy(*tiebreak_order)
+    w_dup_count = Window.partitionBy(natural_key)
     df = (
         df.withColumn("_rn",       F.row_number().over(w_dup))
           .withColumn("_dup_count", F.count("*").over(w_dup_count))
@@ -325,15 +331,16 @@ def _transform_transactions(
     df = df.withColumn("_is_duplicate", F.col("_dup_count") > 1)
     df = df.filter(F.col("_rn") == 1).drop("_rn", "_dup_count")
 
-    # ── Orphaned account check ────────────────────────────────────────────
+    # ── Orphaned account check (join key from dq_rules.yaml) ─────────────
     # Left-join against Silver accounts; a miss means ORPHANED_ACCOUNT.
+    orphan_join_key = orphan_cfg["join_key"]
     silver_acc = (
         spark.read.format("delta").load(silver_accounts_path)
-        .select(F.col("account_id").alias("_valid_account_id"))
+        .select(F.col(orphan_join_key).alias("_valid_account_id"))
     )
     df = df.join(
         F.broadcast(silver_acc),
-        df["account_id"] == silver_acc["_valid_account_id"],
+        df[orphan_join_key] == silver_acc["_valid_account_id"],
         "left",
     )
     # Materialise the orphan flag NOW, before _valid_account_id is dropped.
@@ -341,13 +348,14 @@ def _transform_transactions(
     df = df.drop("_valid_account_id")
 
     # ── Assemble dq_flag (first matching condition wins) ──────────────────
+    type_flag_code = dq_rules["type_checks"]["transactions"][0]["flag_code"]
     dq_flag = (
         F.when(null_required,           F.lit("NULL_REQUIRED"))
-        .when(F.col("_is_orphan"),      F.lit("ORPHANED_ACCOUNT"))
-        .when(F.col("_is_duplicate"),   F.lit("DUPLICATE_DEDUPED"))
-        .when(date_is_variant,          F.lit("DATE_FORMAT"))
-        .when(is_currency_variant,      F.lit("CURRENCY_VARIANT"))
-        .when(amount_type_mismatch,     F.lit("TYPE_MISMATCH"))
+        .when(F.col("_is_orphan"),      F.lit(orphan_cfg["flag_code"]))
+        .when(F.col("_is_duplicate"),   F.lit(dup_cfg["flag_code"]))
+        .when(date_is_variant,          F.lit(date_cfg["flag_code"]))
+        .when(is_currency_variant,      F.lit(curr_cfg["flag_code"]))
+        .when(amount_type_mismatch,     F.lit(type_flag_code))
         .otherwise(F.lit(None).cast("string"))
     )
     df = df.withColumn("dq_flag", dq_flag).drop("_is_orphan", "_is_duplicate")

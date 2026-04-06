@@ -25,6 +25,31 @@ def load_config(path: str = None) -> dict:
         return yaml.safe_load(fh)
 
 
+_DEFAULT_DQ_RULES_PATH = "/data/config/dq_rules.yaml"
+_BUNDLED_DQ_RULES_PATH = "/app/config/dq_rules.yaml"
+
+
+def load_dq_rules(path: str = None) -> dict:
+    """Load and return the YAML data-quality rules configuration.
+
+    Resolution order:
+      1. Explicit ``path`` argument
+      2. ``DQ_RULES_PATH`` environment variable
+      3. ``/data/config/dq_rules.yaml`` (scoring-system mount, if present)
+      4. ``/app/config/dq_rules.yaml`` (bundled fallback)
+    """
+    resolved = path or os.environ.get("DQ_RULES_PATH")
+    if not resolved:
+        resolved = (
+            _DEFAULT_DQ_RULES_PATH
+            if os.path.exists(_DEFAULT_DQ_RULES_PATH)
+            else _BUNDLED_DQ_RULES_PATH
+        )
+    logger.info("Loading DQ rules from: %s", resolved)
+    with open(resolved) as fh:
+        return yaml.safe_load(fh)
+
+
 def get_or_create_spark(config: dict) -> SparkSession:
     """
     Return an existing SparkSession or create one configured for the
