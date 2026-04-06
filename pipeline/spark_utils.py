@@ -9,7 +9,6 @@ import os
 import logging
 
 import yaml
-from delta import configure_spark_with_delta_pip
 from pyspark.sql import SparkSession
 
 logger = logging.getLogger(__name__)
@@ -38,6 +37,15 @@ def get_or_create_spark(config: dict) -> SparkSession:
     master   = spark_cfg.get("master",   "local[2]")
     app_name = spark_cfg.get("app_name", "nedbank-de-pipeline")
 
+    # Delta Lake JARs are bundled in /app/jars/ — no Maven/Ivy download needed.
+    # This makes the build reproducible in an offline scoring environment.
+    _jars_dir = "/app/jars"
+    _delta_jars = ",".join([
+        f"{_jars_dir}/delta-spark_2.12-3.1.0.jar",
+        f"{_jars_dir}/delta-storage-3.1.0.jar",
+        f"{_jars_dir}/antlr4-runtime-4.9.3.jar",
+    ])
+
     builder = (
         SparkSession.builder
         .master(master)
@@ -48,7 +56,8 @@ def get_or_create_spark(config: dict) -> SparkSession:
         # ── Parallelism — match the 2-vCPU constraint ─────────────────────
         .config("spark.default.parallelism",       "4")
         .config("spark.sql.shuffle.partitions",    "4")
-        # ── Delta Lake extensions ─────────────────────────────────────────
+        # ── Delta Lake JARs loaded directly — no Ivy/Maven resolution ─────
+        .config("spark.jars", _delta_jars)
         .config(
             "spark.sql.extensions",
             "io.delta.sql.DeltaSparkSessionExtension",
@@ -63,9 +72,6 @@ def get_or_create_spark(config: dict) -> SparkSession:
         .config("spark.ui.enabled", "false")
     )
 
-    # configure_spark_with_delta_pip adds the pip-installed Delta Lake JARs
-    # to the Spark driver classpath — required when delta-spark is installed
-    # via pip rather than added as a Maven package at session start.
-    session = configure_spark_with_delta_pip(builder).getOrCreate()
+    session = builder.getOrCreate()
     session.sparkContext.setLogLevel("WARN")
     return session

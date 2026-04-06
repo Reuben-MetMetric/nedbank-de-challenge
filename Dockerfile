@@ -14,24 +14,11 @@ ENV PYTHONPATH=/app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy pipeline code and config.
+# Copy pipeline code, config and bundled Delta JARs.
 # Data files are injected at runtime by the scoring system — do NOT copy them.
 COPY pipeline/ pipeline/
 COPY config/   config/
-
-# Pre-warm the Delta Lake Ivy resolution cache during image build.
-# The scoring container has NO internet access at runtime — Spark must find
-# the Delta JARs already cached in /root/.ivy2/ without downloading them.
-# This RUN step executes with internet access (build time only).
-RUN python -c "\
-from delta import configure_spark_with_delta_pip; \
-from pyspark.sql import SparkSession; \
-b = SparkSession.builder.master('local[1]').appName('prewarm') \
-    .config('spark.sql.extensions', 'io.delta.sql.DeltaSparkSessionExtension') \
-    .config('spark.sql.catalog.spark_catalog', 'org.apache.spark.sql.delta.catalog.DeltaCatalog'); \
-spark = configure_spark_with_delta_pip(b).getOrCreate(); \
-spark.stop(); \
-print('Delta JAR cache warm.')"
+COPY jars/     jars/
 
 # Run the complete pipeline end-to-end.
 # No TTY or stdin is required.
