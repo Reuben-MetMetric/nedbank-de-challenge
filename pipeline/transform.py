@@ -280,11 +280,32 @@ def _transform_transactions(
     )
 
     # ── Date parsing ──────────────────────────────────────────────────────
-    df = df.withColumn(
-        "transaction_date_parsed",
-        _parse_date_any(F.col("transaction_date"), date_cfg),
+    # Materialise the primary-format parse as a column FIRST.
+    # Both transaction_date_parsed and date_is_variant need it; materialising
+    # avoids evaluating to_date(col, primary_fmt) twice per row in the
+    # combined dq_flag expression (which would re-invoke it inside
+    # _date_is_variant).  With 1M+ rows this is a measurable saving.
+    primary_fmt = date_cfg["primary_format"]
+    df = df.withColumn("_tx_date_primary",
+                       F.to_date(F.col("transaction_date"), primary_fmt))
+    # Full parse: _tx_date_primary coalesced with variant formats + epoch.
+    variant_fmts  = date_cfg.get("variant_formats", [])
+    epoch_pattern = date_cfg.get("epoch_pattern", r"^\d{9,11}$")
+    tx_date_full  = F.col("_tx_date_primary")
+    for fmt in variant_fmts:
+        tx_date_full = F.coalesce(tx_date_full, F.to_date(F.col("transaction_date"), fmt))
+    tx_date_full = F.coalesce(
+        tx_date_full,
+        F.when(F.col("transaction_date").rlike(epoch_pattern),
+               F.to_date(F.from_unixtime(F.col("transaction_date").cast("long")))),
     )
-    date_is_variant = _date_is_variant(F.col("transaction_date"), date_cfg)
+    df = df.withColumn("transaction_date_parsed", tx_date_full)
+    # Variant flag: primary returned null but full parse succeeded.
+    # Uses already-materialised columns — no re-evaluation of to_date.
+    date_is_variant = (
+        F.col("_tx_date_primary").isNull()
+        & F.col("transaction_date_parsed").isNotNull()
+    )
 
     # ── Build transaction_timestamp (DATE + TIME → TIMESTAMP) ─────────────
     # Use the raw strings before they are cast so the concat is reliable.
@@ -364,6 +385,7 @@ def _transform_transactions(
     df = df.withColumn("dq_flag", dq_flag).drop("_is_orphan", "_is_duplicate")
 
     # ── Final column selection ─────────────────────────────────────────────
+    # _tx_date_primary is excluded (not in final schema).
     df = df.select(
         "transaction_id",
         "account_id",

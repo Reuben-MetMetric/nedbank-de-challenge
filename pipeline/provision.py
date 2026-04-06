@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import DecimalType, LongType
+from pyspark.sql.types import LongType
 
 from pipeline.spark_utils import get_or_create_spark, load_config
 
@@ -97,12 +97,10 @@ def run_provisioning(config: dict = None) -> None:
     silver_transactions = spark.read.format("delta").load(f"{silver}/transactions")
 
     # ── Build dims ────────────────────────────────────────────────────────
-    dim_customers_df = _build_dim_customers(silver_customers)
-    dim_customers_df.write.format("delta").mode("overwrite").save(f"{gold}/dim_customers")
+    _build_dim_customers(silver_customers).write.format("delta").mode("overwrite").save(f"{gold}/dim_customers")
     logger.info("[gold] dim_customers written → %s/dim_customers", gold)
 
-    dim_accounts_df = _build_dim_accounts(silver_accounts)
-    dim_accounts_df.write.format("delta").mode("overwrite").save(f"{gold}/dim_accounts")
+    _build_dim_accounts(silver_accounts).write.format("delta").mode("overwrite").save(f"{gold}/dim_accounts")
     logger.info("[gold] dim_accounts written → %s/dim_accounts", gold)
 
     # ── Build fact ────────────────────────────────────────────────────────
@@ -165,7 +163,7 @@ def _build_dim_customers(silver_customers: DataFrame) -> DataFrame:
         "province",
         "income_band",
         "segment",
-        F.col("risk_score").cast("int").alias("risk_score"),
+        "risk_score",   # already INT from Silver; no-op cast removed
         "kyc_status",
         _age_band_col(F.col("dob")).alias("age_band"),
         # dob intentionally excluded from Gold output per output_schema_spec §4
@@ -188,8 +186,8 @@ def _build_dim_accounts(silver_accounts: DataFrame) -> DataFrame:
         "open_date",
         "product_tier",
         "digital_channel",
-        F.col("credit_limit").cast(DecimalType(18, 2)).alias("credit_limit"),
-        F.col("current_balance").cast(DecimalType(18, 2)).alias("current_balance"),
+        "credit_limit",     # already DECIMAL(18,2) from Silver; no-op cast removed
+        "current_balance",  # already DECIMAL(18,2) from Silver; no-op cast removed
         "last_activity_date",
     )
 

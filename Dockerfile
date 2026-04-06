@@ -24,6 +24,10 @@ COPY pipeline/ pipeline/
 COPY config/   config/
 COPY jars/     jars/
 
+# Pre-create mount-point directories so --read-only container starts correctly.
+# The scoring system mounts host paths at /data/input and /data/output.
+RUN mkdir -p /data/input /data/output /data/config
+
 # Run the complete pipeline end-to-end.
 # No TTY or stdin is required.
 CMD ["python", "pipeline/run_all.py"]

@@ -84,6 +84,10 @@ def get_or_create_spark(config: dict) -> SparkSession:
         # ── Serialisation — Kryo is faster than Java default for shuffle ──
         .config("spark.serializer",
                 "org.apache.spark.serializer.KryoSerializer")
+        # ── FAIR scheduler — lets two concurrently submitted jobs share the ─
+        # 2 executor threads evenly (used for parallel CSV/Silver/dim writes).
+        # Without FAIR, FIFO would fully drain Job A before starting Job B.
+        .config("spark.scheduler.mode", "FAIR")
         # ── Adaptive Query Execution (explicit; default=true in Spark 3.x) ─
         # Enables runtime coalescing of shuffle partitions and skew-join
         # handling, which reduces unnecessary empty tasks on small datasets.
@@ -112,6 +116,14 @@ def get_or_create_spark(config: dict) -> SparkSession:
         .config("spark.driver.extraJavaOptions",   "-Djava.io.tmpdir=/tmp")
         .config("spark.executor.extraJavaOptions", "-Djava.io.tmpdir=/tmp")
         .config("spark.sql.parquet.compression.codec", "uncompressed")
+        # ── Delta write optimisation ──────────────────────────────────────
+        # Disable per-column min/max statistics on all new Delta tables.
+        # We never use data-skipping (all queries do full-table scans), so
+        # collecting stats is pure overhead at write time.
+        .config(
+            "spark.databricks.delta.properties.defaults.dataSkippingNumIndexedCols",
+            "0",
+        )
         # ── Reduce verbose Spark logging in scored runs ───────────────────
         .config("spark.ui.enabled", "false")
     )

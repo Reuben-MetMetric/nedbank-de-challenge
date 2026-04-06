@@ -51,23 +51,24 @@ def run_ingestion(config: dict = None) -> None:
     ingestion_ts = datetime.now(timezone.utc)
     logger.info("Bronze ingestion run started at %s", ingestion_ts.isoformat())
 
-    input_cfg  = config["input"]
+    input_cfg   = config["input"]
     bronze_root = config["output"]["bronze_path"]
 
+    # ── Accounts + customers ─────────────────────────────────────────────
     _ingest_csv(
         spark,
-        src=input_cfg["accounts_path"],
-        dst=f"{bronze_root}/accounts",
-        ingestion_ts=ingestion_ts,
-        label="accounts",
+        input_cfg["accounts_path"],
+        f"{bronze_root}/accounts",
+        ingestion_ts, "accounts",
     )
     _ingest_csv(
         spark,
-        src=input_cfg["customers_path"],
-        dst=f"{bronze_root}/customers",
-        ingestion_ts=ingestion_ts,
-        label="customers",
+        input_cfg["customers_path"],
+        f"{bronze_root}/customers",
+        ingestion_ts, "customers",
     )
+
+    # ── Transactions ─────────────────────────────────────────────────────
     _ingest_jsonl(
         spark,
         src=input_cfg["transactions_path"],
