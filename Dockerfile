@@ -11,6 +11,10 @@ WORKDIR /app
 # `python pipeline/run_all.py` (which sets sys.path[0] to /app/pipeline).
 ENV PYTHONPATH=/app
 
+# Force Spark to bind to loopback — prevents hostname DNS lookup failure
+# when the container runs with --network=none (scoring environment).
+ENV SPARK_LOCAL_IP=127.0.0.1
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

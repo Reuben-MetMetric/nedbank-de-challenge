@@ -51,7 +51,7 @@ def get_or_create_spark(config: dict) -> SparkSession:
         .master(master)
         .appName(app_name)
         # ── Heap sizing — must fit within 2 GB container ceiling ──────────
-        .config("spark.driver.memory",   "1g")
+        .config("spark.driver.memory",   "512m")
         .config("spark.executor.memory", "1g")
         # ── Parallelism — match the 2-vCPU constraint ─────────────────────
         .config("spark.default.parallelism",       "4")
@@ -66,8 +66,15 @@ def get_or_create_spark(config: dict) -> SparkSession:
             "spark.sql.catalog.spark_catalog",
             "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         )
-        # ── Temp dir — /tmp is a 512 MB tmpfs in the scoring container ────
+        # ── Temp dir — /tmp is the only writable tmpfs in the scoring container ─
+        # spark.local.dir: Spark shuffle/spill files
+        # java.io.tmpdir:  native lib extraction (read-only filesystem)
+        # parquet codec:   uncompressed avoids snappy native lib (fails with
+        #                  --read-only + --cap-drop=ALL in scoring environment)
         .config("spark.local.dir", "/tmp")
+        .config("spark.driver.extraJavaOptions",   "-Djava.io.tmpdir=/tmp")
+        .config("spark.executor.extraJavaOptions", "-Djava.io.tmpdir=/tmp")
+        .config("spark.sql.parquet.compression.codec", "uncompressed")
         # ── Reduce verbose Spark logging in scored runs ───────────────────
         .config("spark.ui.enabled", "false")
     )
