@@ -1,0 +1,28 @@
+# Data directories (large files, not for version control)
+data/
+test_data/
+
+# Local Docker base image build (uses local multi-stage; scoring uses official base)
+Dockerfile.base.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Spark / Java runtime artefacts
+derby.log
+metastore_db/
+spark-warehouse/
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,90 @@
+# ============================================================
+# Data Quality Rules
+#
+# Required from Stage 2 onward.  The scoring system checks that
+# transform.py reads DQ logic from this file rather than hardcoding it.
+#
+# Handling actions
+# ─────────────────
+#   correct    — normalise the value and retain the record (clean dq_flag)
+#   flag       — retain the record with the appropriate dq_flag code
+#   quarantine — exclude from Silver/Gold; log the reason
+# ============================================================
+
+# ── Null / required-field checks ─────────────────────────────────────────────
+# Records where any listed field is null receive dq_flag = "NULL_REQUIRED".
+# Action: quarantine (cannot be meaningfully included without a primary key).
+null_checks:
+  transactions:
+    action: quarantine
+    fields:
+      - transaction_id
+      - account_id
+      - amount
+      - transaction_type
+  accounts:
+    action: quarantine
+    fields:
+      - account_id
+
+# ── Orphaned account check ───────────────────────────────────────────────────
+# Transactions whose account_id has no matching record in Silver accounts.
+# Action: flag (retained in Silver with dq_flag = "ORPHANED_ACCOUNT";
+#         excluded from Gold fact_transactions via inner join).
+orphan_checks:
+  transactions:
+    action: flag
+    flag_code: ORPHANED_ACCOUNT
+    join_key: account_id
+    reference_table: silver_accounts
+
+# ── Duplicate detection ───────────────────────────────────────────────────────
+# Transactions sharing a transaction_id.  The earliest (by date+time) is kept.
+# Action: flag the kept survivor with dq_flag = "DUPLICATE_DEDUPED";
+#         discard extra copies.
+duplicate_checks:
+  transactions:
+    action: flag
+    flag_code: DUPLICATE_DEDUPED
+    natural_key: transaction_id
+    tiebreak_order: [transaction_date, transaction_time]
+
+# ── Date format normalisation ─────────────────────────────────────────────────
+# Date fields in non-primary format are normalised to ISO YYYY-MM-DD.
+# Action: correct + flag (normalised record retained; dq_flag = "DATE_FORMAT").
+date_format_checks:
+  primary_format: "yyyy-MM-dd"
+  variant_formats:
+    - "dd/MM/yyyy"
+  epoch_pattern: "^\\d{9,11}$"     # Unix epoch seconds stored as string
+  affected_fields:
+    transactions: [transaction_date]
+    accounts:     [open_date, last_activity_date]
+    customers:    [dob]
+  action: flag
+  flag_code: DATE_FORMAT
+
+# ── Currency normalisation ────────────────────────────────────────────────────
+# Non-standard SA Rand representations are normalised to "ZAR".
+# Action: correct + flag (normalised record retained; dq_flag = "CURRENCY_VARIANT").
+currency_normalisation:
+  target_value: ZAR
+  known_variants:
+    - zar
+    - R
+    - rands
+    - Rands
+    - RANDS
+  iso_numeric: 710    # ISO 4217 numeric code for ZAR
+  action: flag
+  flag_code: CURRENCY_VARIANT
+
+# ── Type mismatch handling ────────────────────────────────────────────────────
+# Fields where the delivered value cannot be cast to the expected type.
+# Action: flag (dq_flag = "TYPE_MISMATCH"; amount set to null if uncorrectable).
+type_checks:
+  transactions:
+    - field: amount
+      expected_type: decimal(18,2)
+      flag_code: TYPE_MISMATCH
+      action: flag
