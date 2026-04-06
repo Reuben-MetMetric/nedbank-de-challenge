@@ -300,17 +300,14 @@ def _write_dq_report(
     """
     fact = spark.read.format("delta").load(f"{gold_path}/fact_transactions")
 
-    # Aggregate flagged counts per issue code
-    flagged_rows = (
-        fact.filter(F.col("dq_flag").isNotNull())
-        .groupBy("dq_flag")
-        .count()
-        .collect()
-    )
+    # Single-scan: groupBy(dq_flag) groups NULL rows too, giving us both
+    # the clean-record count and per-flag counts in one shuffle pass.
+    grouped = fact.groupBy("dq_flag").count().collect()
 
-    flag_counts = {row["dq_flag"]: row["count"] for row in flagged_rows}
+    total_rows    = sum(row["count"] for row in grouped)
+    flag_counts   = {row["dq_flag"]: row["count"] for row in grouped
+                     if row["dq_flag"] is not None}
     total_flagged = sum(flag_counts.values())
-    total_rows    = fact.count()
 
     report = {
         "pipeline_run_timestamp": datetime.now(timezone.utc).isoformat(),

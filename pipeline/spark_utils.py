@@ -81,6 +81,18 @@ def get_or_create_spark(config: dict) -> SparkSession:
         # ── Parallelism — match the 2-vCPU constraint ─────────────────────
         .config("spark.default.parallelism",       "4")
         .config("spark.sql.shuffle.partitions",    "4")
+        # ── Serialisation — Kryo is faster than Java default for shuffle ──
+        .config("spark.serializer",
+                "org.apache.spark.serializer.KryoSerializer")
+        # ── Adaptive Query Execution (explicit; default=true in Spark 3.x) ─
+        # Enables runtime coalescing of shuffle partitions and skew-join
+        # handling, which reduces unnecessary empty tasks on small datasets.
+        .config("spark.sql.adaptive.enabled",                      "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled",   "true")
+        # ── Broadcast threshold — raise to 50 MB so small bridge tables ───
+        # (acc_bridge ~15 MB, cust_bridge ~5 MB) are always broadcast.
+        .config("spark.sql.autoBroadcastJoinThreshold",
+                str(50 * 1024 * 1024))
         # ── Delta Lake JARs loaded directly — no Ivy/Maven resolution ─────
         .config("spark.jars", _delta_jars)
         .config(

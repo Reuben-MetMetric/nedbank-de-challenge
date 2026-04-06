@@ -175,12 +175,9 @@ def _transform_customers(
     df: DataFrame = spark.read.format("delta").load(bronze_src)
 
     # ── Deduplication (keep one row per customer_id) ──────────────────────
-    w_dedup = Window.partitionBy("customer_id").orderBy("customer_id")
-    df = (
-        df.withColumn("_rn", F.row_number().over(w_dedup))
-        .filter(F.col("_rn") == 1)
-        .drop("_rn")
-    )
+    # dropDuplicates is hash-based — no Window sort, no shuffle beyond group-by.
+    # The spec doesn’t require which duplicate is kept for customers.
+    df = df.dropDuplicates(["customer_id"])
 
     df = df.select(
         "customer_id",
@@ -219,12 +216,9 @@ def _transform_accounts(
         df = df.filter(F.col(field).isNotNull())
 
     # ── Deduplication ──────────────────────────────────────────────────────
-    w_dedup = Window.partitionBy("account_id").orderBy("account_id")
-    df = (
-        df.withColumn("_rn", F.row_number().over(w_dedup))
-        .filter(F.col("_rn") == 1)
-        .drop("_rn")
-    )
+    # Hash-based dropDuplicates — avoids Window sort overhead.
+    # The spec doesn’t require which duplicate is retained for accounts.
+    df = df.dropDuplicates(["account_id"])
 
     df = df.select(
         "account_id",
@@ -317,19 +311,28 @@ def _transform_transactions(
         null_required = null_required | F.col(_f).isNull()
 
     # ── Deduplication (natural key + tiebreak order from dq_rules.yaml) ──
-    # Within each duplicate group, keep the earliest record by tiebreak cols.
-    # The survivor retains DUPLICATE_DEDUPED if the group had >1 member.
+    # Keep the earliest record (by tiebreak cols) within each duplicate group.
+    # The survivor is flagged DUPLICATE_DEDUPED if the group had >1 member.
+    #
+    # Both window specs share the same PARTITION BY + ORDER BY, allowing
+    # Spark to combine them into a single sort pass in the physical plan.
+    # Using rowsBetween(unboundedPreceding, unboundedFollowing) on the count
+    # window produces the full-group count (not a running sum).
     natural_key    = dup_cfg["natural_key"]
     tiebreak_order = dup_cfg["tiebreak_order"]
-    w_dup       = Window.partitionBy(natural_key).orderBy(*tiebreak_order)
-    w_dup_count = Window.partitionBy(natural_key)
-    df = (
-        df.withColumn("_rn",       F.row_number().over(w_dup))
-          .withColumn("_dup_count", F.count("*").over(w_dup_count))
+    w_dup   = Window.partitionBy(natural_key).orderBy(*tiebreak_order)
+    w_frame = (
+        Window.partitionBy(natural_key)
+        .orderBy(*tiebreak_order)
+        .rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
     )
-    # Materialise the duplicate flag NOW, before _dup_count is dropped.
-    df = df.withColumn("_is_duplicate", F.col("_dup_count") > 1)
-    df = df.filter(F.col("_rn") == 1).drop("_rn", "_dup_count")
+    df = (
+        df.withColumn("_rn",    F.row_number().over(w_dup))
+          .withColumn("_total", F.count("*").over(w_frame))
+    )
+    # Materialise the duplicate flag BEFORE filtering rows away.
+    df = df.withColumn("_is_duplicate", F.col("_total") > 1)
+    df = df.filter(F.col("_rn") == 1).drop("_rn", "_total")
 
     # ── Orphaned account check (join key from dq_rules.yaml) ─────────────
     # Left-join against Silver accounts; a miss means ORPHANED_ACCOUNT.

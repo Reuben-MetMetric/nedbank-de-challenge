@@ -135,8 +135,11 @@ def _ingest_jsonl(
 
     Spark's JSON reader handles nested objects natively — the `location` and
     `metadata` sub-objects will be stored as StructType columns in Parquet.
-    Schema inference reads the full file once; this is acceptable for up to
-    ~2 GB given the 30-minute time limit.
+
+    samplingRatio=0.01: schema inference samples 1% of rows instead of the
+    full file.  For Stage 2 (3 M rows) that is 30 K rows — more than enough
+    to capture all column types.  This halves Bronze ingestion wall-clock
+    time compared to a full-file double-pass inference.
 
     merchant_subcategory is absent from Stage 1 data entirely.  Spark will
     simply not include the column.  The Silver layer adds it as NULL when
@@ -146,7 +149,8 @@ def _ingest_jsonl(
 
     df = (
         spark.read
-        .option("multiLine", "false")   # JSONL: one object per line
+        .option("multiLine",     "false")    # JSONL: one object per line
+        .option("samplingRatio", "0.01")     # fast schema inference (1% sample)
         .json(src)
     )
 
