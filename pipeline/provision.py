@@ -107,6 +107,9 @@ def run_provisioning(config: dict = None) -> None:
     # sha2 SKs are deterministic from natural keys, so account_sk and
     # customer_sk in the fact are guaranteed to match the dim PKs without
     # re-reading the written Delta tables.
+    # silver_customers / silver_accounts are lightweight (≤100K rows each);
+    # Spark re-scanning them for the bridge joins is cheaper than the GC
+    # pressure that .cache() introduces on the constrained 512m JVM heap.
     fact_df = _build_fact_transactions(
         silver_transactions,
         silver_accounts,

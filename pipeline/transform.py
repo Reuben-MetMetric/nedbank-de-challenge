@@ -118,14 +118,6 @@ def _parse_date_any(col_expr, date_cfg: dict):
     return result
 
 
-def _date_is_variant(col_expr, date_cfg: dict) -> "Column":
-    """
-    True when the raw string represents a valid date but NOT in primary
-    ISO format — i.e., it required a fallback parse.
-    """
-    primary_ok  = _parse_date_primary(col_expr, date_cfg).isNotNull()
-    fallback_ok = _parse_date_any(col_expr, date_cfg).isNotNull()
-    return ~primary_ok & fallback_ok
 
 
 # ─────────────────────────────────────────────────────────────────────────────
