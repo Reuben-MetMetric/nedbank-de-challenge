@@ -48,14 +48,14 @@ Surrogate keys use `sha2(natural_key, 256)` → first 15 hex chars → `conv(hex
 - **Deterministic** — same natural key always produces the same SK, enabling consistent FK joins
 - **Collision-safe** — 2⁶⁰ key space; collision probability negligible for expected data volumes
 
-### Delta JAR Caching
-`configure_spark_with_delta_pip()` is called during the Docker build (`RUN` step) to pre-populate the Ivy cache at `/root/.ivy2/`. At runtime, Spark resolves JARs from cache without any internet access.
+### Delta JAR Bundling
+Delta Lake JARs (`delta-spark`, `delta-storage`, `antlr4-runtime`) are copied into `/app/jars/` during the Docker build and referenced via `spark.jars` in `spark_utils.py`. No Maven/Ivy download occurs at runtime, making the build fully reproducible in an offline scoring environment.
 
 ### DQ Flags
 Priority order (one flag per record): `NULL_REQUIRED` → `ORPHANED_ACCOUNT` → `DUPLICATE_DEDUPED` → `DATE_FORMAT` → `CURRENCY_VARIANT` → `TYPE_MISMATCH`. Clean records get `dq_flag = null`.
 
 ### Resource Constraints
-- `local[2]`, `driver.memory=1g`, `executor.memory=1g`, `shuffle.partitions=4`
+- `local[2]`, `driver.memory=512m`, `executor.memory=1g`, `shuffle.partitions=4`
 
 ---
 
@@ -74,7 +74,7 @@ docker build -t candidate-submission:latest .
 ```bash
 docker run --rm \
   -v /path/to/test_data:/data \
-  -m 4g --cpus="2" \
+  -m 2g --cpus="2" \
   candidate-submission:latest
 ```
 
@@ -82,7 +82,7 @@ docker run --rm \
 ```bash
 docker run --rm \
   -v /path/to/test_data:/data \
-  -m 4g --cpus="2" \
+  -m 2g --cpus="2" \
   candidate-submission:latest python /data/validate.py
 ```
 

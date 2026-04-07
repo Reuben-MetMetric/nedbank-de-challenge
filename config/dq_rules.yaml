@@ -13,10 +13,14 @@
 
 # ── Null / required-field checks ─────────────────────────────────────────────
 # Records where any listed field is null receive dq_flag = "NULL_REQUIRED".
-# Action: quarantine (cannot be meaningfully included without a primary key).
+# • transactions — flag (retain in Silver with dq_flag set; excluded from Gold
+#                  fact_transactions because they fail the FK join).
+# • accounts     — quarantine (dropped before Silver write; an account without
+#                  an account_id cannot participate in any join).
 null_checks:
   transactions:
-    action: quarantine
+    action: flag
+    flag_code: NULL_REQUIRED
     fields:
       - transaction_id
       - account_id
